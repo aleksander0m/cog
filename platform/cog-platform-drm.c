@@ -573,7 +573,71 @@ init_glib ()
 static void
 on_export_buffer_resource (void* data, struct wl_resource* buffer_resource)
 {
-    assert (!"should not be reached");
+    fprintf(stderr, "on_export_buffer_resource() %p\n", buffer_resource);
+
+    struct gbm_bo* bo = gbm_bo_import (gbm_data.device, GBM_BO_IMPORT_WL_BUFFER,
+                                       (void *) buffer_resource, GBM_BO_USE_SCANOUT);
+    fprintf(stderr, "\tbo %p\n", bo);
+    if (!bo)
+        return;
+
+    uint32_t width = gbm_bo_get_width (bo);
+    uint32_t height = gbm_bo_get_height (bo);
+    uint32_t format = gbm_bo_get_format (bo);
+
+    uint32_t in_handles[4] = { 0, };
+    uint32_t in_strides[4] = { 0, };
+    uint32_t in_offsets[4] = { 0, };
+    uint64_t in_modifiers[4] = { 0, };
+    in_modifiers[0] = gbm_bo_get_modifier (bo);
+
+    int plane_count = gbm_bo_get_plane_count (bo);
+    fprintf(stderr, "\tplane count %d\n", plane_count);
+    for (int i = 0; i < plane_count; ++i) {
+        in_handles[i] = gbm_bo_get_handle_for_plane (bo, i).u32;
+        in_strides[i] = gbm_bo_get_stride_for_plane (bo, i);
+        in_offsets[i] = gbm_bo_get_offset (bo, i);
+        in_modifiers[i] = in_modifiers[0];
+    }
+
+    int flags = 0;
+    if (in_modifiers[0])
+        flags = DRM_MODE_FB_MODIFIERS;
+
+    uint32_t fb_id = 0;
+    int ret = drmModeAddFB2WithModifiers (drm_data.fd, width, height, format,
+                                          in_handles, in_strides, in_offsets,
+                                          in_modifiers, &fb_id, flags);
+    if (ret) {
+        fprintf(stderr, "oops, have to go again\n");
+
+        in_handles[0] = gbm_bo_get_handle(bo).u32;
+        in_handles[1] = in_handles[2] = in_handles[3] = 0;
+        in_strides[0] = gbm_bo_get_stride(bo);
+        in_strides[1] = in_strides[2] = in_strides[3] = 0;
+        in_offsets[0] = in_offsets[1] = in_offsets[2] = in_offsets[3] = 0;
+
+        ret = drmModeAddFB2 (drm_data.fd, width, height, format,
+                             in_handles, in_strides, in_offsets, &fb_id, 0);
+    }
+    fprintf(stderr, "ret %d\n", ret);
+
+    if (!drm_data.mode_set) {
+        ret = drmModeSetCrtc (drm_data.fd, drm_data.crtc_id, fb_id, 0, 0,
+                              &drm_data.connector_id, 1, drm_data.mode);
+        if (ret)
+            return;
+        drm_data.mode_set = true;
+    }
+
+    fprintf(stderr, "should flip\n");
+
+    struct buffer_object* buffer = g_new0 (struct buffer_object, 1);
+    buffer->fb_id = fb_id;
+    buffer->bo = bo;
+    buffer->buffer_resource = buffer_resource;
+    ret = drmModePageFlip (drm_data.fd, drm_data.crtc_id, fb_id,
+                           DRM_MODE_PAGE_FLIP_EVENT, buffer);
 }
 
 static void
